@@ -1,0 +1,6 @@
+name = "media-relay-pages"
+pages_build_output_dir = "dist"
+compatibility_date = "2024-09-23"
+
+[vars]
+RELAY_TOKEN = "af58eb889fced9a76267dc01acf277a6daa369b63fd77d34"
