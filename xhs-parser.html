@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>小红书素材解析</title>
+<script src="./xhsSign.browser.js"></script>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f2f2f7; color: #1d1d1f; padding: 16px; }
+  h2 { font-size: 18px; margin: 4px 0 14px; }
+  .card { background: #fff; border-radius: 14px; padding: 14px; box-shadow: 0 2px 12px rgba(0,0,0,.05); margin-bottom: 12px; }
+  input[type=text] { width: 100%; border: 1px solid #e3e3e8; border-radius: 10px; padding: 11px 12px;
+    font-size: 14px; outline: none; }
+  input[type=text]:focus { border-color: #ff2e4d; }
+  button { border: none; border-radius: 10px; padding: 11px 16px; font-size: 14px; font-weight: 600;
+    background: #ff2e4d; color: #fff; cursor: pointer; }
+  button:active { transform: scale(.97); }
+  button.ghost { background: #f3f4f6; color: #1d1d1f; }
+  .row { display: flex; gap: 8px; margin-top: 10px; }
+  .row button { flex: 1; }
+  #status { font-size: 13px; color: #888; margin-top: 10px; min-height: 18px; }
+  #status.err { color: #ff2e4d; }
+  #status.ok { color: #18a058; }
+  .media { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
+  .media img, .media video { width: 100%; border-radius: 10px; background: #000; display: block; }
+  .title { font-size: 14px; font-weight: 600; margin: 2px 0 8px; word-break: break-all; }
+  .url { font-size: 11px; color: #999; word-break: break-all; margin-top: 4px; }
+  details { margin-top: 10px; font-size: 13px; }
+  summary { cursor: pointer; color: #ff2e4d; }
+  .tip { font-size: 12px; color: #ff6b00; background: #fff7e6; padding: 8px 10px; border-radius: 8px; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h2>小红书素材解析</h2>
+
+  <div class="card">
+    <input type="text" id="url" placeholder="粘贴小红书笔记链接（含 xsec_token）">
+    <div class="row">
+      <button id="parse">解析素材</button>
+      <button class="ghost" id="fillClip">粘贴剪贴板</button>
+    </div>
+    <div id="status"></div>
+    <details>
+      <summary>小红书登录凭据 web_session（仅存本机浏览器）</summary>
+      <div class="row" style="margin-top:8px;">
+        <input type="text" id="sess" placeholder="粘贴 web_session（从浏览器 Cookie 获取）">
+      </div>
+      <div class="row">
+        <button id="saveSess">保存</button>
+        <button class="ghost" id="clearSess">清除</button>
+      </div>
+      <div class="tip">接口需要登录态。web_session 只保存在你本机浏览器 localStorage，不会上传服务器。可在电脑浏览器登录小红书后，用开发者工具 Application → Cookies 找到 web_session 复制粘贴。</div>
+    </details>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none;">
+    <div class="title" id="rTitle"></div>
+    <div id="media"></div>
+    <div class="row">
+      <button id="copyAll">复制全部链接</button>
+      <button class="ghost" id="backMini" style="display:none;">传回小程序</button>
+    </div>
+  </div>
+
+  <!-- 微信 JS-SDK（web-view 内可用 wx.miniProgram 回传）；非微信环境加载失败不影响使用 -->
+  <script src="https://res.wx.qq.com/open/js/jweixin-1.6.0.js"></script>
+  <script>
+  (function () {
+    var RELAY = 'https://media-relay-pages.pages.dev'
+    var TOKEN = 'af58eb889fced9a76267dc01acf277a6daa369b63fd77d34'
+    var A1 = '19fe338f040m2czjvl6fxz32ry6wbd6uq9m59u57130000373979'
+    var $ = function (id) { return document.getElementById(id) }
+    var statusEl = $('status')
+
+    function setStatus(msg, cls) { statusEl.textContent = msg; statusEl.className = cls || '' }
+
+    // ---- 解析链接里的 noteId / xsec_token ----
+    function parseXhsUrl(u) {
+      var m = u.match(/(?:explore|discovery\/item|item)\/([0-9a-zA-Z]+)/)
+      var noteId = m ? m[1] : ''
+      var xsecToken = (u.match(/xsec_token=([^&]+)/) || [,''])[1]
+      var xsecSource = (u.match(/xsec_source=([^&]+)/) || [,'pc_share'])[1]
+      return { noteId: noteId, xsecToken: decodeURIComponent(xsecToken), xsecSource: xsecSource }
+    }
+
+    function getSess() {
+      var fromUrl = new URLSearchParams(location.search).get('sess')
+      if (fromUrl) { localStorage.setItem('xhs_sess', fromUrl); return fromUrl }
+      return localStorage.getItem('xhs_sess') || ''
+    }
+
+    // ---- 视频直链提取（与油猴 v1.5.0 一致，绝不用封面 v.url）----
+    function isImageUrl(u) { return /\.(jpg|jpeg|png|webp|gif|bmp|avif)(\?|$)/i.test(u) }
+    function extractVideoUrl(card) {
+      try {
+        var v = card.video
+        if (!v) return ''
+        var candidates = []
+        var stream = (v.media && v.media.stream) || {}
+        ;(stream.h264 || []).concat(stream.h265 || []).forEach(function (rep) {
+          if (!rep) return
+          if (rep.master_url) candidates.push(rep.master_url)
+          if (rep.backup_urls) rep.backup_urls.forEach(function (u) { if (u) candidates.push(u) })
+        })
+        if (v.consumer) {
+          var key = v.consumer.origin_video_key || v.consumer.originVideoKey
+          if (key) {
+            candidates.push('https://sns-video-bd.xhscdn.com/' + key)
+            candidates.push('https://sns-video-qc.xhscdn.com/' + key)
+          }
+        }
+        if (v.media && v.media.masterVideo && v.media.masterVideo.url) candidates.push(v.media.masterVideo.url)
+        var valid = candidates.filter(function (u) { return u && /^https?:\/\//.test(u) && !isImageUrl(u) })
+        return valid[0] || ''
+      } catch (e) { return '' }
+    }
+
+    function renderResult(res) {
+      $('resultCard').style.display = 'block'
+      $('rTitle').textContent = (res.title || '(无标题)') + (res.author ? '  @' + res.author : '')
+      var media = $('media'); media.innerHTML = ''
+      var urls = res.type === 'video' ? (res.video ? [res.video] : []) : (res.images || [])
+      if (!urls.length) {
+        setStatus('未能提取到媒体，可能 web_session 失效或该笔记受限', 'err')
+      } else {
+        setStatus('解析成功 ✓', 'ok')
+      }
+      urls.slice(0, 9).forEach(function (u) {
+        if (res.type === 'video') {
+          var vid = document.createElement('video')
+          vid.src = u; vid.controls = true; vid.style.cssText = 'grid-column:1/3;'
+          media.appendChild(vid)
+        } else {
+          var img = document.createElement('img'); img.src = u; img.onerror = function () { this.style.display = 'none' }
+          media.appendChild(img)
+        }
+      })
+      $('copyAll').onclick = function () {
+        var text = urls.join('\n')
+        if (navigator.clipboard) navigator.clipboard.writeText(text)
+        $('copyAll').textContent = '已复制 ✓'
+        setTimeout(function () { $('copyAll').textContent = '复制全部链接' }, 1500)
+      }
+      // 微信 web-view：显示"传回小程序"
+      if (window.wx && window.wx.miniProgram) {
+        $('backMini').style.display = ''
+        $('backMini').onclick = function () {
+          try {
+            window.wx.miniProgram.postMessage({
+              data: { type: res.type, title: res.title, author: res.author, mediaList: urls }
+            })
+            window.wx.miniProgram.navigateBack()
+          } catch (e) { setStatus('回传失败：' + e.message, 'err') }
+        }
+      }
+    }
+
+    async function doParse() {
+      var raw = $('url').value.trim() || new URLSearchParams(location.search).get('url') || ''
+      if (!raw) { setStatus('请先粘贴小红书链接', 'err'); return }
+      var info = parseXhsUrl(raw)
+      if (!info.noteId) { setStatus('未能从链接识别 noteId，请粘贴完整笔记链接', 'err'); return }
+      var sess = getSess()
+      if (!sess) { setStatus('请先填写 web_session（展开下方凭据框）', 'err'); return }
+      setStatus('解析中…')
+      try {
+        var apiPath = '/api/sns/web/v1/feed'
+        var body = {
+          source_note_id: info.noteId,
+          image_formats: ['jpg', 'webp', 'avif'],
+          extra: { need_body_topic: '1' },
+          xsec_source: info.xsecSource,
+          xsec_token: info.xsecToken
+        }
+        var sign = window.xhsSignBrowser.generateSign(apiPath, body, A1)
+        var target = RELAY + '/relay?token=' + TOKEN + '&url=' +
+          encodeURIComponent('https://edith.xiaohongshu.com' + apiPath)
+        var resp = await fetch(target, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json;charset=UTF-8',
+            'x-s': sign['X-s'],
+            'x-s-common': sign['X-s-common'],
+            'x-t': sign['X-t'],
+            'x-upstream-referer': 'https://www.xiaohongshu.com/',
+            'x-upstream-cookie': 'web_session=' + sess
+          },
+          body: JSON.stringify(body)
+        })
+        var j = await resp.json()
+        if (j.code && j.code !== 0) {
+          if (String(j.code) === '300015') setStatus('被风控(300015)：web_session 可能失效，或该笔记受限。请更新 web_session 重试。', 'err')
+          else setStatus('接口返回 code ' + j.code + ' ' + (j.msg || ''), 'err')
+          return
+        }
+        var item = j.data && j.data.items && j.data.items[0]
+        if (!item) { setStatus('未返回笔记数据（链接失效/被删/缺少 xsec_token）', 'err'); return }
+        var card = item.note_card || {}
+        var res = { title: card.display_title || card.title || '(无标题)', author: (card.user && card.user.nickname) || '', type: card.type }
+        if (card.type === 'video') res.video = extractVideoUrl(card)
+        else res.images = (card.image_list || []).map(function (im) {
+          return im.url_default || (im.info_list && im.info_list[0] && im.info_list[0].url) || ''
+        }).filter(Boolean)
+        if ((card.type === 'video' && !res.video) || (card.type !== 'video' && (!res.images || !res.images.length))) {
+          setStatus('接口返回数据不完整（视频流可能被加密），可尝试换条链接或更新 web_session', 'err')
+          return
+        }
+        renderResult(res)
+      } catch (e) {
+        setStatus('请求失败：' + (e && e.message || e), 'err')
+      }
+    }
+
+    // ---- 初始化 ----
+    $('parse').onclick = doParse
+    $('fillClip').onclick = function () {
+      if (navigator.clipboard) navigator.clipboard.readText().then(function (t) { $('url').value = t.trim() }).catch(function () {})
+    }
+    $('saveSess').onclick = function () {
+      var s = $('sess').value.trim(); if (s) { localStorage.setItem('xhs_sess', s); setStatus('已保存 web_session', 'ok') }
+    }
+    $('clearSess').onclick = function () { localStorage.removeItem('xhs_sess'); setStatus('已清除') }
+
+    // 从 URL 参数预填（小程序跳过来时带 ?url=）
+    var qUrl = new URLSearchParams(location.search).get('url')
+    if (qUrl) $('url').value = qUrl
+    var saved = localStorage.getItem('xhs_sess')
+    if (saved) $('sess').value = saved
+  })()
+  </script>
+</body>
+</html>
