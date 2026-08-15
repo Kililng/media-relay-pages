@@ -1,8 +1,9 @@
 export async function onRequest(context) {
-  const { request } = context
+  const { request, env } = context
   const url = new URL(request.url)
   if (url.pathname !== '/relay' && url.pathname !== '/fetch') {
-    return new Response('not found', { status: 404 })
+    // 非 API 路由：回退到静态资源（xhs-parser.html、xhsSign.browser.js、index.html 等）
+    return env.ASSETS.fetch(request)
   }
   const token = url.searchParams.get('token')
   const expected = context.env.RELAY_TOKEN || 'af58eb889fced9a76267dc01acf277a6daa369b63fd77d34'
